@@ -163,8 +163,15 @@ def cmd_process(args: argparse.Namespace) -> None:
     except ValueError as e:
         raise SystemExit(str(e))
 
+    # Determine if today is in this month
+    today = date.today()
+    month_contains_today = any(r.day.year == today.year and r.day.month == today.month for r in rows)
+    
     denom = office + remote
-    print(f"{args.year:04d}-{args.month:02d} (until today)")
+    if month_contains_today:
+        print(f"{args.year:04d}-{args.month:02d} (until today)")
+    else:
+        print(f"{args.year:04d}-{args.month:02d}")
     print(f"office={office} remote={remote} holiday={holiday}")
     print(f"office_pct = {office}/{denom} = {pct:.1f}%")
 
