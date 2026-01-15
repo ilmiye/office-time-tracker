@@ -152,31 +152,135 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def cmd_process(args: argparse.Namespace) -> None:
     base_dir = Path(args.dir)
-    path = month_file_path(base_dir, args.year, args.month)
-
-    rows, errors = parse_month_file(path)
-    if errors:
-        raise SystemExit("Invalid month file:\n- " + "\n- ".join(errors))
-
-    try:
-        pct, office, remote, holiday = compute_until_today(rows)
-    except ValueError as e:
-        raise SystemExit(str(e))
-
-    # Determine if today is in this month
-    today = date.today()
-    month_contains_today = any(r.day.year == today.year and r.day.month == today.month for r in rows)
     
-    denom = office + remote
-    if month_contains_today:
-        print(f"{args.year:04d}-{args.month:02d} (until today)")
-    else:
-        print(f"{args.year:04d}-{args.month:02d}")
-    print(f"office={office} remote={remote} holiday={holiday}")
-    print(f"office_pct = {office}/{denom} = {pct:.1f}%")
+    # Parse comma-separated months
+    months = [int(m.strip()) for m in args.month.split(',')]
+    
+    # Process each month
+    all_results = []
+    for month in months:
+        path = month_file_path(base_dir, args.year, month)
 
-    # Extra strictness: detect any past days beyond today that were filled incorrectly is already handled by parser
-    # We also want to throw if there are any blank past days; already done above.
+        rows, errors = parse_month_file(path)
+        if errors:
+            raise SystemExit(f"Invalid month file for {args.year:04d}-{month:02d}:\n- " + "\n- ".join(errors))
+
+        try:
+            pct, office, remote, holiday = compute_until_today(rows)
+        except ValueError as e:
+            raise SystemExit(f"Error in {args.year:04d}-{month:02d}: {e}")
+
+        # Determine if today is in this month
+        today = date.today()
+        month_contains_today = any(r.day.year == today.year and r.day.month == today.month for r in rows)
+        
+        all_results.append({
+            'month': month,
+            'office': office,
+            'remote': remote,
+            'holiday': holiday,
+            'pct': pct,
+            'contains_today': month_contains_today
+        })
+    
+    # Display individual month results
+    for result in all_results:
+        denom = result['office'] + result['remote']
+        month_label = f"{args.year:04d}-{result['month']:02d}"
+        if result['contains_today']:
+            month_label += " (until today)"
+        
+        print(f"{month_label}")
+        print(f"  office={result['office']} remote={result['remote']} holiday={result['holiday']}")
+        print(f"  office_pct = {result['office']}/{denom} = {result['pct']:.1f}%")
+        print()
+    
+    # If multiple months, show aggregate
+    if len(all_results) > 1:
+        total_office = sum(r['office'] for r in all_results)
+        total_remote = sum(r['remote'] for r in all_results)
+        total_holiday = sum(r['holiday'] for r in all_results)
+        total_denom = total_office + total_remote
+        total_pct = (total_office / total_denom * 100.0) if total_denom else 0.0
+        
+        month_range = f"{args.year:04d}-{months[0]:02d} to {args.year:04d}-{months[-1]:02d}"
+        print(f"AGGREGATE ({month_range})")
+        print(f"  office={total_office} remote={total_remote} holiday={total_holiday}")
+        print(f"  office_pct = {total_office}/{total_denom} = {total_pct:.1f}%")
+
+
+def cmd_process_multi(args: argparse.Namespace) -> None:
+    """Process multiple year-month pairs (e.g., 2025-12,2026-01,2026-02)"""
+    base_dir = Path(args.dir)
+    
+    # Parse year-month pairs
+    year_month_pairs = []
+    for ym in args.months.split(','):
+        ym = ym.strip()
+        try:
+            year_str, month_str = ym.split('-')
+            year = int(year_str)
+            month = int(month_str)
+            if not (1 <= month <= 12):
+                raise ValueError(f"Month must be 1-12, got {month}")
+            year_month_pairs.append((year, month))
+        except ValueError as e:
+            raise SystemExit(f"Invalid year-month format '{ym}'. Expected YYYY-MM (e.g., 2026-01). Error: {e}")
+    
+    # Process each month
+    all_results = []
+    for year, month in year_month_pairs:
+        path = month_file_path(base_dir, year, month)
+
+        rows, errors = parse_month_file(path)
+        if errors:
+            raise SystemExit(f"Invalid month file for {year:04d}-{month:02d}:\n- " + "\n- ".join(errors))
+
+        try:
+            pct, office, remote, holiday = compute_until_today(rows)
+        except ValueError as e:
+            raise SystemExit(f"Error in {year:04d}-{month:02d}: {e}")
+
+        # Determine if today is in this month
+        today = date.today()
+        month_contains_today = any(r.day.year == today.year and r.day.month == today.month for r in rows)
+        
+        all_results.append({
+            'year': year,
+            'month': month,
+            'office': office,
+            'remote': remote,
+            'holiday': holiday,
+            'pct': pct,
+            'contains_today': month_contains_today
+        })
+    
+    # Display individual month results
+    for result in all_results:
+        denom = result['office'] + result['remote']
+        month_label = f"{result['year']:04d}-{result['month']:02d}"
+        if result['contains_today']:
+            month_label += " (until today)"
+        
+        print(f"{month_label}")
+        print(f"  office={result['office']} remote={result['remote']} holiday={result['holiday']}")
+        print(f"  office_pct = {result['office']}/{denom} = {result['pct']:.1f}%")
+        print()
+    
+    # If multiple months, show aggregate
+    if len(all_results) > 1:
+        total_office = sum(r['office'] for r in all_results)
+        total_remote = sum(r['remote'] for r in all_results)
+        total_holiday = sum(r['holiday'] for r in all_results)
+        total_denom = total_office + total_remote
+        total_pct = (total_office / total_denom * 100.0) if total_denom else 0.0
+        
+        first = all_results[0]
+        last = all_results[-1]
+        month_range = f"{first['year']:04d}-{first['month']:02d} to {last['year']:04d}-{last['month']:02d}"
+        print(f"AGGREGATE ({month_range})")
+        print(f"  office={total_office} remote={total_remote} holiday={total_holiday}")
+        print(f"  office_pct = {total_office}/{total_denom} = {total_pct:.1f}%")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -192,10 +296,14 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--month", type=int, required=True)
     pi.set_defaults(func=cmd_init)
 
-    pp = sub.add_parser("process-month", help="Validate + compute office%% until today for a month file")
+    pp = sub.add_parser("process-month", help="Validate + compute office%% until today for a month file (or multiple months)")
     pp.add_argument("--year", type=int, required=True)
-    pp.add_argument("--month", type=int, required=True)
+    pp.add_argument("--month", type=str, required=True, help="Month number (1-12) or comma-separated months (e.g., 2,3,4)")
     pp.set_defaults(func=cmd_process)
+
+    pm = sub.add_parser("process-months", help="Process multiple year-month pairs (supports cross-year ranges)")
+    pm.add_argument("--months", type=str, required=True, help="Comma-separated year-month pairs (e.g., 2025-12,2026-01,2026-02)")
+    pm.set_defaults(func=cmd_process_multi)
 
     return p
 
