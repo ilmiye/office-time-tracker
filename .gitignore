@@ -1,0 +1,6 @@
+.venv/
+example_data/
+.env
+.DS_Store
+.idea/
+.claude/

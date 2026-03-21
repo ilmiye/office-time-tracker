@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import os
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -287,7 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Track office%% using a per-month TXT file. Quarters not needed for this command flow."
     )
-    p.add_argument("--dir", default="office_days_records", help="Directory to store month files")
+    p.add_argument("--dir", default=os.environ.get("OFFICE_TRACKER_DIR", "office_days_records"), help="Directory to store month files")
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
