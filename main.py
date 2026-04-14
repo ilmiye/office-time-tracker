@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import math
 import os
 from dataclasses import dataclass
 from datetime import date
@@ -10,7 +11,6 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 VALID = {"holiday", "remote", "office"}
-ALLOWED_EMPTY = True  # empty status means "not filled" and is an error for past days
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,7 @@ def generate_month_file(base_dir: Path, y: int, m: int) -> Path:
 def parse_month_file(path: Path) -> Tuple[List[Row], List[str]]:
     errors: List[str] = []
     rows: List[Row] = []
+    errored_dates: set = set()
 
     if not path.exists():
         raise SystemExit(f"Month file not found: {path}")
@@ -60,8 +61,6 @@ def parse_month_file(path: Path) -> Tuple[List[Row], List[str]]:
             continue  # ignore blank lines entirely
 
         parts = line.split()
-        if len(parts) == 0:
-            continue
 
         # Expect: YYYY-MM-DD [status]
         if len(parts) > 2:
@@ -82,6 +81,7 @@ def parse_month_file(path: Path) -> Tuple[List[Row], List[str]]:
                 errors.append(
                     f"Line {i}: invalid status {status!r}. Allowed: {sorted(VALID)}"
                 )
+                errored_dates.add(d)
                 continue
 
         rows.append(Row(day=d, status=status))
@@ -100,7 +100,7 @@ def parse_month_file(path: Path) -> Tuple[List[Row], List[str]]:
         _, last_day = calendar.monthrange(y, m)
         expected = {date(y, m, d) for d in range(1, last_day + 1)}
         actual = {r.day for r in rows}
-        missing = sorted(expected - actual)
+        missing = sorted(expected - actual - errored_dates)
         extra = sorted(actual - expected)
         if missing:
             errors.append(
@@ -144,6 +144,48 @@ def compute_until_today(rows: List[Row]) -> Tuple[float, int, int, int]:
     denom = office + remote
     pct = (office / denom * 100.0) if denom else 0.0
     return pct, office, remote, holiday
+
+
+def compute_needed(rows: List[Row], target_pct: float) -> Tuple[float, int, int, int, int, int, int, int]:
+    """
+    Returns: (pct_current, office, remote, holiday, remaining, needed, denom_current, denom_total)
+
+    Counts strictly past days (before today) as settled.
+    Today + future blank days are counted as `remaining` workdays.
+    Holidays (pre-filled) are excluded from remaining.
+    `needed` = office days required from remaining to hit target_pct overall.
+    """
+    today = date.today()
+    office = remote = holiday = 0
+    remaining = 0
+
+    for r in rows:
+        if r.day < today:
+            if r.status is None:
+                raise ValueError(f"Unfilled status for past day: {r.day.isoformat()}")
+            if r.status == "office":
+                office += 1
+            elif r.status == "remote":
+                remote += 1
+            elif r.status == "holiday":
+                holiday += 1
+        else:  # today or future
+            if r.status is None:
+                remaining += 1
+            elif r.status == "holiday":
+                holiday += 1
+            elif r.status == "office":
+                office += 1
+            elif r.status == "remote":
+                remote += 1
+
+    denom_current = office + remote
+    pct_current = (office / denom_current * 100.0) if denom_current else 0.0
+    denom_total = denom_current + remaining
+    needed = math.ceil(target_pct / 100.0 * denom_total - office) if denom_total else 0
+    needed = max(0, needed)
+
+    return pct_current, office, remote, holiday, remaining, needed, denom_current, denom_total
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -284,6 +326,88 @@ def cmd_process_multi(args: argparse.Namespace) -> None:
         print(f"  office_pct = {total_office}/{total_denom} = {total_pct:.1f}%")
 
 
+def _print_target_result(month_range: str, office: int, remote: int, holiday: int,
+                         pct_current: float, remaining: int, denom_current: int,
+                         denom_total: int, needed: int, target_pct: float) -> None:
+    today = date.today()
+    print(f"Period : {month_range}  (as of {today.isoformat()})")
+    print(f"Settled: office={office}  remote={remote}  holiday={holiday}")
+    print(f"Current: {office}/{denom_current} = {pct_current:.1f}%")
+    print(f"Remaining unfilled workdays: {remaining}")
+    print()
+    print(f"Target: {target_pct:.1f}%")
+    print()
+    if remaining == 0:
+        print(f"No remaining days — final office % is {pct_current:.1f}%")
+    elif needed <= 0:
+        print(f"Already at target! You can take all {remaining} remaining days remote.")
+    elif needed > remaining:
+        max_pct = (office + remaining) / denom_total * 100.0
+        print(f"Not achievable — max possible is {max_pct:.1f}%")
+        print(f"(would need {needed} office days but only {remaining} remain)")
+    else:
+        can_remote = remaining - needed
+        print(f"You need {needed} office days out of {remaining} remaining days")
+        print(f"You can take {can_remote} more remote days")
+
+
+def cmd_target(args: argparse.Namespace) -> None:
+    base_dir = Path(args.dir)
+    target_pct = args.target
+    months = [int(m.strip()) for m in args.month.split(',')]
+
+    all_rows: List[Row] = []
+    for month in months:
+        path = month_file_path(base_dir, args.year, month)
+        rows, errors = parse_month_file(path)
+        if errors:
+            raise SystemExit(f"Invalid month file for {args.year:04d}-{month:02d}:\n- " + "\n- ".join(errors))
+        all_rows.extend(rows)
+
+    try:
+        pct_current, office, remote, holiday, remaining, needed, denom_current, denom_total = compute_needed(all_rows, target_pct)
+    except ValueError as e:
+        raise SystemExit(f"Error: {e}")
+
+    month_range = f"{args.year:04d}-{months[0]:02d} to {args.year:04d}-{months[-1]:02d}"
+    _print_target_result(month_range, office, remote, holiday, pct_current,
+                         remaining, denom_current, denom_total, needed, target_pct)
+
+
+def cmd_target_range(args: argparse.Namespace) -> None:
+    """Cross-year target calculation (e.g., Q4 spanning Nov-Dec + Jan next year)."""
+    base_dir = Path(args.dir)
+    target_pct = args.target
+
+    year_month_pairs = []
+    for ym in args.months.split(','):
+        ym = ym.strip()
+        try:
+            year_str, month_str = ym.split('-')
+            year_month_pairs.append((int(year_str), int(month_str)))
+        except ValueError:
+            raise SystemExit(f"Invalid year-month format '{ym}'. Expected YYYY-MM.")
+
+    all_rows: List[Row] = []
+    for year, month in year_month_pairs:
+        path = month_file_path(base_dir, year, month)
+        rows, errors = parse_month_file(path)
+        if errors:
+            raise SystemExit(f"Invalid month file for {year:04d}-{month:02d}:\n- " + "\n- ".join(errors))
+        all_rows.extend(rows)
+
+    try:
+        pct_current, office, remote, holiday, remaining, needed, denom_current, denom_total = compute_needed(all_rows, target_pct)
+    except ValueError as e:
+        raise SystemExit(f"Error: {e}")
+
+    first_y, first_m = year_month_pairs[0]
+    last_y, last_m = year_month_pairs[-1]
+    month_range = f"{first_y:04d}-{first_m:02d} to {last_y:04d}-{last_m:02d}"
+    _print_target_result(month_range, office, remote, holiday, pct_current,
+                         remaining, denom_current, denom_total, needed, target_pct)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Track office%% using a per-month TXT file. Quarters not needed for this command flow."
@@ -305,6 +429,17 @@ def build_parser() -> argparse.ArgumentParser:
     pm = sub.add_parser("process-months", help="Process multiple year-month pairs (supports cross-year ranges)")
     pm.add_argument("--months", type=str, required=True, help="Comma-separated year-month pairs (e.g., 2025-12,2026-01,2026-02)")
     pm.set_defaults(func=cmd_process_multi)
+
+    pt = sub.add_parser("target", help="Show how many remaining days must be office to hit a target %%")
+    pt.add_argument("--year", type=int, required=True)
+    pt.add_argument("--month", type=str, required=True, help="Comma-separated months (e.g., 2,3,4)")
+    pt.add_argument("--target", type=float, default=50.0, help="Target office %% (default: 50.0)")
+    pt.set_defaults(func=cmd_target)
+
+    ptr = sub.add_parser("target-range", help="Cross-year target calculation (e.g., Q4)")
+    ptr.add_argument("--months", type=str, required=True, help="Comma-separated YYYY-MM pairs (e.g., 2026-11,2026-12,2027-01)")
+    ptr.add_argument("--target", type=float, default=50.0, help="Target office %% (default: 50.0)")
+    ptr.set_defaults(func=cmd_target_range)
 
     return p
 
